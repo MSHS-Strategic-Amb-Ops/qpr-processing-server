@@ -1082,6 +1082,8 @@ for (i in index_squence) {
 
 ```{r Referrals Data Importing, echo = FALSE, warning = FALSE, message = FALSE}
 
+report_run_date <- Sys.Date()
+
 # Connect to Database ----------------------------------------------------------
 # conn1 <- odbcConnect("Caboodle") # Connect to Server
 
