@@ -1,0 +1,1294 @@
+---
+title: "quarterly-processing"
+output: html_document
+date: '2022-06-29'
+---
+
+```{r Load Packages, echo = FALSE, warning = FALSE, message = FALSE}
+# # Load packages -----------------------------------------------------------------------------------
+suppressMessages({
+  memory.limit(size = 8000000)
+  library(readxl)
+  library(writexl)
+  library(plyr)
+  library(dplyr)
+  library(data.table)
+  library(zoo)
+  library(shiny)
+  library(shinydashboard)
+  library(shinydashboardPlus)
+  library(shinyWidgets)
+  library(htmlwidgets)
+  library(lubridate)
+  library(tcltk)
+  library(tidyverse)
+  library(plotly)
+  library(knitr)
+  library(kableExtra)
+  library(leaflet)
+  library(grid)
+  library(gridExtra)
+  library(eeptools)
+  library(ggQC)
+  library(zipcodeR)
+  library(utils)
+  library(scales)
+  library(chron)
+  library(bupaR)
+  library(shiny)
+  library(DT)
+  library(DiagrammeR)
+  library(shinyalert)
+  library(edeaR)
+  library(processmapR)
+  library(processmonitR)
+  library(processanimateR)
+  library(tidyr)
+  library(lubridate)
+  library(RColorBrewer)
+  library(DiagrammeR)
+  library(ggplot2)
+  library(leaflet)
+  library(readr)
+  library(highcharter)
+  library(ggforce) # for 'geom_arc_bar'
+  library(packcircles) # for packed circle graph
+  library(viridis)
+  library(ggiraph)
+  library(treemapify)
+  library(treemap)
+  library(broom)
+  library(extrafont)
+  library(tis) # for US holidays
+  library(vroom)
+  library(sjmisc)
+  library(tools)
+  library(here)
+  library(shinyBS)
+  library(shinyscreenshot)
+  library(fasttime)
+  library(shinycssloaders)
+  library(feather)
+  # library(zipcodeR)
+  library(formattable)
+  library(shinyjs)
+  library(janitor)
+  library(patchwork)
+  library(flexdashboard)
+  # library(tidyverse)
+  # library(viridis)
+  # library(hrbrthemes)
+  # library(plotly)
+  # install.packages("bsts")
+  library(bsts)
+  library(reactable)
+  # install.packages("reactablefmtr")
+  library(reactablefmtr)
+  library(svDialogs)
+  # library(openxlsx)
+  library(flextable)
+  library(officedown)
+  library(officer)
+  library(magrittr)
+  library(webshot) 
+  library(png)
+  library(ggh4x)
+  library(RODBC)
+  library(DBI)
+  library(odbc)
+  library(dbplyr)
+  library(pool)
+  library(emojifont)
+  library(bizdays)
+})
+
+
+
+```
+
+
+```{r Connect Data, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Connection to Oracle DB ------------------------------------------------------
+conn1 <- dbPool(drv = odbc(), dsn = "OAO Cloud DB SoYoun", timeout = 30)
+
+# Import Slot Availability Data ------------------------------------------------
+# slot_raw_tbl <- tbl(conn1, "Y_DM_BOOKED_FILLED_RATE")
+access_raw_tbl <- tbl(conn1, "MV_DM_PATIENT_ACCESS")
+
+# date_1 <- paste0(format(Sys.Date(), "%Y-%m-%d"), " 23:59:59")
+date_1 <- paste0(format(Sys.Date(), "%Y-%m-%d"), " 00:00:00")
+```
+
+
+```{r Global Functions, echo = FALSE, warning = FALSE, message = FALSE}
+
+'%!in%' <- function(x,y)!('%in%'(x,y)) # Does not include
+not_all_na <- function(x) all(!is.na(x)) # Exclude columns with All NAs
+
+```
+
+
+```{r Processing Variables, echo = FALSE, warning = FALSE, message = FALSE}
+
+quarter_start <- "2022-01-01"
+quarter_end <- "2023-12-31"
+
+quarter_start_date <- paste0(format(as.Date(quarter_start), "%Y-%m-%d"), " 00:00:00")
+quarter_end_date <- paste0(format(as.Date(quarter_end), "%Y-%m-%d"), " 00:00:00")
+
+quarters_list <- sort(unique(as.yearqtr(seq(from=as.Date(quarter_start) , to=floor_date(as.Date(quarter_end) -1, "month"), by="month"))))
+ytd_month_list <- seq(1, format(as.Date(quarter_end), "%m"))
+
+reporting_year <- format(as.Date(quarter_end), "%Y") 
+prior_year <- as.numeric(format(as.Date(quarter_end), "%Y"))-1
+
+reporting_month <- ifelse(length(ytd_month_list) == 12, 
+                          paste0(format(as.Date(quarter_end) - 1, "%B"), " ", format(as.Date(quarter_end) - 1, "%Y")),
+                          paste0(format(as.Date(quarter_end) - 1, "%B")," YTD ",format(as.Date(quarter_end) - 1, "%Y")))
+
+```
+
+
+```{r Process Scheduling Data, echo = FALSE, warning = FALSE, message = FALSE}
+
+scheduling_data_raw_tbl <- access_raw_tbl %>%
+  mutate(Appt.DateYear = TO_DATE(APPT_DTTM),
+         Appt.Year = year(APPT_DTTM),
+         Appt.MonNum = month(APPT_DTTM),
+         Appt.Made.DateYear = TO_DATE(APPT_MADE_DTTM),
+         Appt.Made.Year = year(APPT_MADE_DTTM),
+         Appt.Made.MonNum = month(APPT_MADE_DTTM)) %>%
+  mutate(Wait.Time = TO_DATE(CONTACT_DATE) - TO_DATE(APPT_MADE_DATE)) %>%
+  mutate(group = ifelse(Wait.Time >= 0 & Wait.Time <=7, "0-7",
+                        ifelse(Wait.Time >7 & Wait.Time <=14, "8-14",
+                               ifelse(Wait.Time >14 & Wait.Time <=30, "15-30", ">30")))) %>%
+  mutate(New.PT2  = ifelse(is.na(VISIT_GROUP_NUM), 'Established', 'New')) %>%
+  mutate(Visit.Method  = ifelse(VISIT_METHOD == "IN PERSON", 'IN PERSON', 'TELEHEALTH')) 
+
+```
+
+
+```{r Map Campus.Specialty.Group, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Master Ambulatory Mapping ----------------------------------------------------
+# master_amb_mapping <- as.data.frame(read_excel("master_amb_mapping_updated.xlsx", col_types = "text"))
+master_amb_mapping_tbl <- tbl(conn1, "MASTER_AMB_MAPPING")
+
+
+master_amb_mapping_tbl <- master_amb_mapping_tbl %>%
+  mutate(CAMPUS = ifelse(is.na(`GROUPER 17 UPDATE`), CAMPUS, `GROUPER 17 UPDATE`)) %>%
+  rename(Site = CAMPUS,
+         Campus.Specialty = CAMPUS_SPECIALTY,
+         Department = DEPARTMENT_NAME,
+         DepartmentId = DEPARTMENT_ID,
+         Managed = `Managed by Department or Site`) %>%
+  mutate(Site = toupper(Site)) %>%
+  dplyr::select(Site, DepartmentId, Department, Campus.Specialty.Group, Campus.Specialty.SubGroup, Managed, `Office/Procedure`)
+
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  left_join(master_amb_mapping_tbl,
+            by = c("DEPARTMENT_ID" = "DepartmentId"))
+
+```
+
+
+```{r Map Sessional Provider Departments, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Mapping of sessional providers  ----------------------------------------------
+# sessional_prov_mapping <- as.data.frame(read_excel("/nfs/data/Applications/Ambulatory/master_amb_sessional_provider_mapping.xlsx", col_types = "text"))
+sessional_prov_mapping_tbl <- tbl(conn1, "MASTER_AMB_MAPPING_PROV")
+
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  left_join(sessional_prov_mapping_tbl,
+            by = c("DEPARTMENT_NAME", "DEPARTMENT_ID", "NPI"))
+
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  mutate(Site = ifelse(is.na(`Sessional Site`), Site, `Sessional Site`),
+         Managed = ifelse(is.na(`Sessional Managed`), Managed, `Sessional Managed`),
+         Campus.Specialty.Group = ifelse(is.na(`Sessional Campus.Specialty.Group`), Campus.Specialty.Group, `Sessional Campus.Specialty.Group`),
+         Office = ifelse(is.na(`Sessional Office`), `Office/Procedure`, `Sessional Office`)) 
+
+```
+
+
+```{r Map Office vs. Procedure, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Mapping of Office vs. Procedure Encounters by Appt Type ----------------------
+# appt_type_mapping <- as.data.frame(read_excel("/nfs/data/Applications/Ambulatory/master_amb_appt_type_mapping.xlsx", col_types = "text"))
+appt_type_mapping <- tbl(conn1, "MASTER_AMB_MAPPING_APPT")
+
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  left_join(appt_type_mapping,
+            by = c("Campus.Specialty.Group", "PRC_NAME"))
+
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  filter(is.na(Classification) | Classification != "Exclude") %>%
+  mutate(Office = ifelse(is.na(Classification), Office, Classification)) 
+
+```
+
+
+```{r Data Manual Mapping of Specialty (Campus.Specialty.Group), echo = FALSE, warning = FALSE, message = FALSE}
+
+# Mix of NeuroSurg and Ortho provideres at 787 11TH AVE MSW SPINE CENTER
+ortho_providers_npi <- c("1538318209", #CHO, SAMUEL K-W
+                         "1770829541", #MAHAJER, AMIR
+                         "1962829309", #KIM, JUN SUP
+                         "1750417283") #BAX, JOSEPH A.
+
+ortho_providers <- c("CHO, SAMUEL K-W", 
+                     "MAHAJER, AMIR", 
+                     "KIM, JUN SUP", 
+                     "BAX, JOSEPH A") 
+
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  mutate(Campus.Specialty.Group = ifelse(DEPARTMENT_NAME == "787 11TH AVE MSW SPINE CENTER" & NPI %in% ortho_providers_npi, "Orthopedics", Campus.Specialty.Group))
+
+```
+
+
+```{r Process EPIC Open Encounters, echo = FALSE, warning = FALSE, message = FALSE}
+
+scheduling_data_raw_tbl <- scheduling_data_raw_tbl %>%
+  mutate(enc.status = ifelse(ENC_CLOSED_CHARGE_STATUS %in% c("OPEN", "CLOSED BUT COSIGN NEEDED"), 'OPEN', 'CLOSED')) %>%
+  mutate(open.days = ifelse(enc.status == "OPEN", 
+                            TO_DATE(lubridate::today()) - TO_DATE(CONTACT_DATE),
+                            TO_DATE(Y_ENC_CLOSE_TIME) - TO_DATE(CONTACT_DATE))) %>%
+  mutate(Provider = trim(REGEXP_REPLACE(PROV_NAME_WID, "\\[.*?\\]", "" ))) 
+
+
+```
+
+
+```{r Access Tables by Month, echo = FALSE, warning = FALSE, message = FALSE}
+
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_specialty <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, Appt.Made.MonNum, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n()) %>%
+#   collect()
+#   
+# 
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_site <-  scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, Appt.Made.MonNum, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n()) %>%
+#   collect()
+# 
+# 
+# ## Median Wait Time ============================================================
+# ### By Specialty
+# waitTime_mshs <-  scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   collect()
+# 
+# ### By Specialty and Site
+# waitTime_site <-  scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   collect()
+# 
+# ### By Specialty and Provider
+# waitTime_prov <-  scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   filter(New.PT2 == "New") %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Provider, NPI, Appt.Made.Year, Appt.Made.MonNum) %>%
+#   summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE))) %>%
+#   collect()
+# 
+# 
+# # Processing by Campus.Specialty.Group -----------------------------------------
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_specialty_group <-  scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Appt.Made.Year, Appt.Made.MonNum, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n()) %>%
+#   collect()
+# 
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_site_group <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Site, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Site, Appt.Made.Year, Appt.Made.MonNum, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n()) %>%
+#   collect()
+# 
+# ## Median Wait Time ============================================================
+# ### By Specialty
+# waitTime_mshs_group <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   collect()
+# 
+# ### By Specialty and Site
+# waitTime_site_group <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Site, Appt.Made.Year, Appt.Made.MonNum, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   collect()
+# 
+# ### By Specialty and Provider
+# waitTime_prov_group <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   filter(New.PT2 == "New") %>%
+#   group_by(Campus.Specialty.Group, Site, Provider, NPI) %>%
+#   summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE))) %>%
+#   collect()
+
+```
+
+
+```{r Access Tables by Month (Office), echo = FALSE, warning = FALSE, message = FALSE}
+
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_specialty_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n())
+# 
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_site_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n())
+# 
+# 
+# ## Median Wait Time ============================================================
+# ### By Specialty
+# waitTime_mshs_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE))
+# 
+# ### By Specialty and Site
+# waitTime_site_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE))
+# 
+# ### By Specialty and Provider
+# waitTime_prov_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   filter(New.PT2 == "New") %>%
+#   group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Provider, NPI) %>%
+#   summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE)))
+# 
+# 
+# # Processing by Campus.Specialty.Group -----------------------------------------
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_specialty_group_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n())
+# 
+# ## MSHS New Patient Wait Time Horizon ===============================================
+# waitTime_dist_site_group_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Site, New.PT2) %>%
+#   mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+#   group_by(Campus.Specialty.Group, Site, Appt.Made.YearQtr, New.PT2, Visit.Method, med_wait, group) %>%
+#   summarise(total = n())
+# 
+# ## Median Wait Time ============================================================
+# ### By Specialty
+# waitTime_mshs_group_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE))
+# 
+# ### By Specialty and Site
+# waitTime_site_group_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   group_by(Campus.Specialty.Group, Site, New.PT2) %>%
+#   summarise(med_wait = median(Wait.Time, na.rm = TRUE))
+# 
+# ### By Specialty and Provider
+# waitTime_prov_group_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(Wait.Time >= 0)  %>%
+#   filter(New.PT2 == "New") %>%
+#   group_by(Campus.Specialty.Group, Site, Provider, NPI) %>%
+#   summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE)))
+
+```
+
+
+```{r YTD Access Tables, echo = FALSE, warning = FALSE, message = FALSE}
+
+waitTime_ytd <- scheduling_data_raw_tbl %>%
+  filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(!is.na(Site)) %>%
+  filter(Wait.Time >= 0)  %>%
+  filter(Appt.Made.MonNum %in% ytd_month_list) 
+
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_specialty_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_site_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+
+## Median Wait Time ============================================================
+### By Specialty
+waitTime_mshs_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Site
+waitTime_site_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, Site, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Provider
+waitTime_prov_ytd <- waitTime_ytd %>%
+  filter(New.PT2 == "New") %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, Provider, NPI) %>%
+  summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE))) %>%
+  collect()
+
+
+# Processing by Campus.Specialty.Group -----------------------------------------
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_specialty_group_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_site_group_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Site, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Site, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+## Median Wait Time ============================================================
+### By Specialty
+waitTime_mshs_group_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Site
+waitTime_site_group_ytd <- waitTime_ytd %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, Site, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Provider
+waitTime_prov_group_ytd <- waitTime_ytd %>%
+  filter(New.PT2 == "New") %>%
+  group_by(Campus.Specialty.Group, Site, Appt.Made.Year, Provider, NPI) %>%
+  summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE))) %>%
+  collect()
+
+```
+
+
+```{r YTD Access Tables (Office), echo = FALSE, warning = FALSE, message = FALSE}
+
+waitTime_ytd_office <- scheduling_data_raw_tbl %>%
+  filter(APPT_MADE_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_MADE_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(Office == "Office") %>%
+  filter(!is.na(Site)) %>%
+  filter(Wait.Time >= 0)  %>%
+  filter(Appt.Made.MonNum %in% ytd_month_list) 
+
+# Access Tables ----------------------------------------------------------------
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_specialty_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_site_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+
+## Median Wait Time ============================================================
+### By Specialty
+waitTime_mshs_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Site
+waitTime_site_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Appt.Made.Year, Site, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Provider
+waitTime_prov_office_ytd <- waitTime_ytd_office %>%
+  filter(New.PT2 == "New") %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Made.Year, Provider, NPI) %>%
+  summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE))) %>%
+  collect()
+
+
+# Processing by Campus.Specialty.Group -----------------------------------------
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_specialty_group_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+## MSHS New Patient Wait Time Horizon ===============================================
+waitTime_dist_site_group_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Site, Appt.Made.Year, New.PT2) %>%
+  mutate(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  group_by(Campus.Specialty.Group, Site, Appt.Made.Year, New.PT2, Visit.Method, med_wait, group) %>%
+  summarise(total = n()) %>%
+  collect()
+
+## Median Wait Time ============================================================
+### By Specialty
+waitTime_mshs_group_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Site
+waitTime_site_group_office_ytd <- waitTime_ytd_office %>%
+  group_by(Campus.Specialty.Group, Appt.Made.Year, Site, New.PT2) %>%
+  summarise(med_wait = median(Wait.Time, na.rm = TRUE)) %>%
+  collect()
+
+### By Specialty and Provider
+waitTime_prov_group_office_ytd <- waitTime_ytd_office %>%
+  filter(New.PT2 == "New") %>%
+  group_by(Campus.Specialty.Group, Site, Appt.Made.Year, Provider, NPI) %>%
+  summarise(med_wait = as.numeric(median(Wait.Time, na.rm = TRUE))) %>%
+  collect()
+
+```
+
+
+```{r Process Wait Time Table, echo = FALSE, warning = FALSE, message = FALSE}
+
+waitTime_site_group_ytd_merged <- bind_rows(waitTime_dist_site_group_ytd %>% mutate(type = "All"),
+                                            waitTime_dist_site_group_office_ytd %>% mutate(type = "Office"))
+
+
+waitTime_site_ytd_merged <- bind_rows(waitTime_dist_site_ytd %>% mutate(type = "All"),
+                                            waitTime_dist_site_office_ytd %>% mutate(type = "Office"))
+
+waitTime_specialty_ytd_merged <- bind_rows(waitTime_dist_specialty_ytd %>% mutate(type = "All"),
+                                                waitTime_dist_specialty_office_ytd %>% mutate(type = "Office"))
+
+```
+
+
+```{r Execute Wait Time Table, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Truncate the table
+dbExecute(conn1, "TRUNCATE TABLE QPR_WAIT_TIME_GROUP")
+
+## Write to Oracle 
+batch_size <- 1000
+ 
+index_squence <- seq(1, nrow(waitTime_site_group_ytd_merged), by = batch_size)
+for (i in index_squence) {
+  if(i == max(index_squence)) {
+    batch <- waitTime_site_group_ytd_merged[i:nrow(waitTime_site_group_ytd_merged), ]
+  } else {
+    batch <- waitTime_site_group_ytd_merged[i:(i + batch_size - 1), ]
+  }
+  dbWriteTable(conn = conn1, name = "QPR_WAIT_TIME_GROUP", value = batch, row.names = FALSE, append = TRUE)
+  print(paste0("i is:", i))
+  print(batch)
+}
+
+
+
+# Truncate the table
+dbExecute(conn1, "TRUNCATE TABLE QPR_WAIT_TIME")
+
+## Write to Oracle 
+batch_size <- 1000
+ 
+index_squence <- seq(1, nrow(waitTime_site_ytd_merged), by = batch_size)
+for (i in index_squence) {
+  if(i == max(index_squence)) {
+    batch <- waitTime_site_ytd_merged[i:nrow(waitTime_site_ytd_merged), ]
+  } else {
+    batch <- waitTime_site_ytd_merged[i:(i + batch_size - 1), ]
+  }
+  dbWriteTable(conn = conn1, name = "QPR_WAIT_TIME", value = batch, row.names = FALSE, append = TRUE)
+  print(paste0("i is:", i))
+  print(batch)
+}
+
+
+# Truncate the table
+dbExecute(conn1, "TRUNCATE TABLE QPR_WAIT_TIME_SPECIALTY")
+
+## Write to Oracle 
+batch_size <- 1000
+ 
+index_squence <- seq(1, nrow(waitTime_specialty_ytd_merged), by = batch_size)
+for (i in index_squence) {
+  if(i == max(index_squence)) {
+    batch <- waitTime_specialty_ytd_merged[i:nrow(waitTime_specialty_ytd_merged), ]
+  } else {
+    batch <- waitTime_specialty_ytd_merged[i:(i + batch_size - 1), ]
+  }
+  dbWriteTable(conn = conn1, name = "QPR_WAIT_TIME_SPECIALTY", value = batch, row.names = FALSE, append = TRUE)
+  print(paste0("i is:", i))
+  print(batch)
+}
+
+```
+
+
+```{r Volume Tables (All), echo = FALSE, warning = FALSE, message = FALSE}
+
+# Volume Tables ----------------------------------------------------------------
+## Arrived monthly volume by Campus, Campus.Specialty, Department, Appt.YearQtr. Appt.MonNum, Appt.Month, Visit.Method, monthly_vol
+monthly_vol <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(!is.na(Site)) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  group_by(Site, Campus.Specialty.Group, Campus.Specialty.SubGroup, Department, Appt.Year, Appt.MonNum, Visit.Method) %>%
+  summarise(monthly_vol = n()) %>%
+  collect() %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b"))
+  
+
+monthly_vol <- monthly_vol %>%
+  pivot_wider(
+    names_from = Visit.Method,
+    values_from = monthly_vol,
+    values_fill=list(monthly_vol=0)
+  ) %>%
+  mutate(Total = sum(`IN PERSON`, TELEHEALTH)) %>%
+  pivot_longer(
+    8:10,
+    names_to = "Visit.Method",
+    values_to = "monthly_vol"
+  )
+
+```
+
+
+```{r Execute Monthly Volume Table, echo = FALSE, warning = FALSE, message = FALSE}
+
+monthly_vol_table <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(!is.na(Site)) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  group_by(Site, Campus.Specialty.Group, Campus.Specialty.SubGroup, Department, Appt.Year, Appt.MonNum, Visit.Method, Office) %>%
+  summarise(monthly_vol = n()) %>%
+  collect() %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b"))
+
+# Truncate the table
+dbExecute(conn1, "TRUNCATE TABLE QPR_MONTHLY_VOLUME")
+
+## Write to Oracle 
+batch_size <- 1000
+ 
+index_squence <- seq(1, nrow(monthly_vol_table), by = batch_size)
+for (i in index_squence) {
+  if(i == max(index_squence)) {
+    batch <- monthly_vol_table[i:nrow(monthly_vol_table), ]
+  } else {
+    batch <- monthly_vol_table[i:(i + batch_size - 1), ]
+  }
+  dbWriteTable(conn = conn1, name = "QPR_MONTHLY_VOLUME", value = batch, row.names = FALSE, append = TRUE)
+  print(paste0("i is:", i))
+  print(batch)
+}
+
+```
+
+
+```{r Volume Tables (Office), echo = FALSE, warning = FALSE, message = FALSE}
+
+# Volume Tables ----------------------------------------------------------------
+## Arrived monthly volume by Campus, Campus.Specialty, Department, Appt.YearQtr. Appt.MonNum, Appt.Month, Visit.Method, monthly_vol
+# monthly_vol_office <- scheduling_data_raw_tbl %>%
+#   filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+#   filter(Managed == "Department") %>%
+#   filter(Office == "Office") %>%
+#   filter(!is.na(Site)) %>%
+#   filter(DERIVED_STATUS_DESC == "Arrived") %>%
+#   group_by(Site, Campus.Specialty.Group, Campus.Specialty.SubGroup, Department, Appt.Year, Appt.MonNum, Visit.Method) %>%
+#   summarise(monthly_vol = n()) %>%
+#   collect() %>%
+#   mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b"))
+# 
+# 
+# monthly_vol_office <- monthly_vol_office %>%
+#   pivot_wider(
+#     names_from = Visit.Method,
+#     values_from = monthly_vol,
+#     values_fill=list(monthly_vol=0)
+#   ) %>%
+#   mutate(Total = sum(`IN PERSON`, TELEHEALTH)) %>%
+#   pivot_longer(
+#     8:10,
+#     names_to = "Visit.Method",
+#     values_to = "monthly_vol"
+#   )
+
+```
+
+
+```{r Volume by Zipcode, echo = FALSE, warning = FALSE, message = FALSE}
+
+dept_zip_code_ref_tbl <- tbl(conn1, "DEPT_ZIP_CODE")
+dept_zip_code <- dept_zip_code_ref_tbl %>% collect()
+
+## Arrived quarterly volume by Campus.Specialty, Appt.YearQtr, dept_zip_code, lat, lang, total_vol
+vol_zip_code <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(!is.na(Site)) %>%
+  filter(Appt.MonNum %in% ytd_month_list) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, DEPARTMENT_NAME, Appt.Year, Appt.MonNum) %>%
+  summarise(total_vol = n()) %>%
+  collect() %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b"))
+
+vol_zip_code <- vol_zip_code %>%
+  left_join(dept_zip_code, 
+            by = c("DEPARTMENT_NAME" = "Department Name")) %>%
+  mutate(dept_zip_code=factor(`Clean Address Zip Code`, unique(`Clean Address Zip Code`))) %>%
+  rename(lat = Latitude,
+         lng = Longitude) 
+
+```
+
+
+```{r Volume by Zipcode (Office), echo = FALSE, warning = FALSE, message = FALSE}
+
+vol_zip_code_office <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(Office == "Office") %>%
+  filter(!is.na(Site)) %>%
+  filter(Appt.MonNum %in% ytd_month_list) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, DEPARTMENT_NAME, Appt.Year, Appt.MonNum) %>%
+  summarise(total_vol = n()) %>%
+  collect() %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b"))
+
+vol_zip_code_office <- vol_zip_code_office %>%
+  left_join(dept_zip_code, 
+            by = c("DEPARTMENT_NAME" = "Department Name")) %>%
+  mutate(dept_zip_code=factor(`Clean Address Zip Code`, unique(`Clean Address Zip Code`))) %>%
+  rename(lat = Latitude,
+         lng = Longitude) 
+
+```
+
+
+```{r Payor Mix Table, echo = FALSE, warning = FALSE, message = FALSE}
+
+payer_mix_ytd <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(!is.na(Site)) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Year, Appt.MonNum, FINCLASS) %>%
+  summarise(payer = n()) %>%
+  collect()
+
+
+payer_mix_ytd <- payer_mix_ytd %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b")) %>%
+  mutate(Coverage = case_when(str_detect(FINCLASS, "Commercial/Managed Care") ~ "Commercial/ Managed Care",
+                              str_detect(FINCLASS, "Commercial") ~ "Commercial/ Managed Care",
+                              str_detect(FINCLASS, "WTC") ~ "Commercial/ Managed Care",
+                              str_detect(FINCLASS, "Medicaid Managed Care") ~ "Medicaid HMO",
+                              str_detect(FINCLASS, "Medicaid MS") ~ "Medicaid",
+                              str_detect(FINCLASS, "Medicaid HMO") ~ "Medicaid HMO",
+                              str_detect(FINCLASS, "Medicare Managed Care") ~ "Medicare HMO",
+                              str_detect(FINCLASS, "Medicare MS") ~ "Medicare",
+                              str_detect(FINCLASS, "Medicare HMO") ~ "Medicare HMO",
+                              str_detect(FINCLASS, "Self") ~ "Self-Pay",
+                              TRUE ~ "Other")) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Year, Appt.MonNum, Appt.Month, Coverage) %>%
+  summarise(payer = sum(payer))
+
+```
+
+
+```{r Execute Payor Mix Table, echo = FALSE, warning = FALSE, message = FALSE}
+
+payer_mix_ytd_table <- payer_mix_ytd
+
+
+# Truncate the table
+dbExecute(conn1, "TRUNCATE TABLE QPR_PAYER_MIX")
+
+## Write to Oracle 
+batch_size <- 1000
+ 
+index_squence <- seq(1, nrow(payer_mix_ytd_table), by = batch_size)
+for (i in index_squence) {
+  if(i == max(index_squence)) {
+    batch <- payer_mix_ytd_table[i:nrow(payer_mix_ytd_table), ]
+  } else {
+    batch <- payer_mix_ytd_table[i:(i + batch_size - 1), ]
+  }
+  dbWriteTable(conn = conn1, name = "QPR_PAYER_MIX", value = batch, row.names = FALSE, append = TRUE)
+  print(paste0("i is:", i))
+  print(batch)
+}
+
+```
+
+
+```{r Payor Mix Table (Office), echo = FALSE, warning = FALSE, message = FALSE}
+
+payer_mix_ytd_office <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  filter(Managed == "Department") %>%
+  filter(Office == "Office") %>%
+  filter(!is.na(Site)) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Year, Appt.MonNum, FINCLASS) %>%
+  summarise(payer = n()) %>%
+  collect()
+
+payer_mix_ytd_office <- payer_mix_ytd_office %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.Year,"-",Appt.MonNum,"-01"), "%Y-%m-%d"), "%b")) %>%
+  mutate(Coverage = case_when(str_detect(FINCLASS, "Commercial/Managed Care") ~ "Commercial/ Managed Care",
+                              str_detect(FINCLASS, "Commercial") ~ "Commercial/ Managed Care",
+                              str_detect(FINCLASS, "WTC") ~ "Commercial/ Managed Care",
+                              str_detect(FINCLASS, "Medicaid Managed Care") ~ "Medicaid Managed Care",
+                              str_detect(FINCLASS, "Medicaid MS") ~ "Medicaid HMO",
+                              str_detect(FINCLASS, "Medicaid HMO") ~ "Medicaid HMO",
+                              str_detect(FINCLASS, "Medicare Managed Care") ~ "Medicare Managed Care",
+                              str_detect(FINCLASS, "Medicare MS") ~ "Medicare HMO",
+                              str_detect(FINCLASS, "Medicare HMO") ~ "Medicare HMO",
+                              str_detect(FINCLASS, "Self") ~ "Self-Pay",
+                              TRUE ~ "Other")) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, Appt.Year, Appt.MonNum, Appt.Month, Coverage) %>%
+  summarise(payer = sum(payer))
+
+```
+
+
+```{r Open Encounters Metric Trending by Site 3, fig.width=12, fig.height = 5, fig.align = 'center', echo = FALSE, warning = FALSE, message = FALSE}
+
+# EPIC Open Encounters Exclusion Criteria ---------------------------------
+missing_enc_dept_tbl <- tbl(conn1, "OPEN_ENC_EXCLUSION_DEPT")
+missing_enc_visit_tbl <- tbl(conn1, "OPEN_ENC_EXCLUSION_VISIT")
+missing_enc_resource_tbl <- tbl(conn1, "OPEN_ENC_EXCLUSION_RESOURCE")
+
+missing_exc_dept <- missing_enc_dept_tbl %>% collect()
+missing_exc_resource <- missing_enc_resource_tbl %>% collect()
+missing_exc_visitType <- missing_enc_visit_tbl %>% collect()
+
+exc_depts <- unique(missing_exc_dept$DEPARTMENT)
+exc_providers <- unique(missing_exc_resource$PROVIDER)
+exc_prc_name <- unique(missing_exc_visitType$PRC_NAME)
+exc_prc_id <- unique(missing_exc_visitType$PRC_ID)
+
+# missing_chg_cutOff <- paste0(format(as.Date(missing_chg_cutOff), "%Y-%m-%d"), " 00:00:00")
+
+missing_chg_data <- scheduling_data_raw_tbl %>%
+  filter(APPT_DTTM >= TO_DATE(quarter_start_date,"YYYY-MM-DD HH24:MI:SS") & APPT_DTTM <= TO_DATE(quarter_end_date,"YYYY-MM-DD HH24:MI:SS")) %>%
+  # filter(Managed == "Department") %>%
+  filter(!is.na(Site)) %>%
+  filter(DERIVED_STATUS_DESC == "Arrived") %>%
+  filter(VISIT_PROV_STAFF_RESOURCE_C == 1) %>%
+  mutate(group = ifelse(enc.status == "CLOSED" & open.days <= 5, "Closed <=5 Days",
+                        ifelse(enc.status == "CLOSED" & open.days >5, "Closed >5 Days", "Open"))) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, SITE, DEPARTMENT_NAME, Provider, PRC_NAME, PRC_ID, Appt.Year, Appt.MonNum, enc.status, group) %>%
+  summarise(total = n()) %>%
+  collect()
+  
+missing_chg_data <- missing_chg_data %>% 
+  filter(DEPARTMENT_NAME %!in% exc_depts) %>%
+  filter(Provider %!in% exc_providers) %>%
+  filter(PRC_NAME %!in% exc_prc_name) %>%
+  filter(PRC_ID %!in% exc_prc_id) %>%
+  filter(!str_detect(PRC_NAME, "ECHO|SOCIAL|NURSE|NUTRITION|LAB|TREATMENT")) %>%
+  mutate(Appt.Month = format(as.Date(paste0(Appt.MonNum, "-01-", Appt.Year), "%m-%d-%Y"), "%b")) %>%
+  mutate(Appt.Year = as.character(Appt.Year)) %>%
+  mutate(Appt.MonthYear = paste0(Appt.Month,"-",Appt.Year)) %>%
+  mutate(Appt.YearQtr = as.yearqtr(as.Date(paste0("01-",Appt.MonthYear), "%d-%m-%Y"))) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, SITE, Appt.Year, Appt.MonthYear, Appt.Month, Appt.MonNum, group) %>%
+  summarise(total = sum(total)) 
+  
+missing_chg_data <- missing_chg_data %>%
+  mutate(Appt.YearQtr = as.yearqtr(as.Date(paste0(Appt.MonNum,"-01-",Appt.Year), "%m-%d-%Y"))) 
+
+```
+
+
+```{r}
+
+site_encounters <- missing_chg_data %>%
+  filter(Appt.Year == 2023) %>%
+  group_by(SITE, Managed, Campus.Specialty.Group, Campus.Specialty.SubGroup, group) %>%
+  summarise(total = n()) %>%
+  group_by(SITE, Managed, Campus.Specialty.Group, Campus.Specialty.SubGroup) %>%
+  mutate(perc = round(total/sum(total),2))
+
+```
+
+
+```{r Execute Open Encounters Table, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Truncate the table
+dbExecute(conn1, "TRUNCATE TABLE QPR_OPEN_ENCOUNTERS")
+
+## Write to Oracle 
+batch_size <- 1000
+ 
+index_squence <- seq(1, nrow(missing_chg_data), by = batch_size)
+for (i in index_squence) {
+  if(i == max(index_squence)) {
+    batch <- missing_chg_data[i:nrow(missing_chg_data), ]
+  } else {
+    batch <- missing_chg_data[i:(i + batch_size - 1), ]
+  }
+  dbWriteTable(conn = conn1, name = "QPR_OPEN_ENCOUNTERS", value = batch, row.names = FALSE, append = TRUE)
+  print(paste0("i is:", i))
+  print(batch)
+}
+
+```
+
+
+```{r Referrals Data Importing, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Connect to Database ----------------------------------------------------------
+# conn1 <- odbcConnect("Caboodle") # Connect to Server
+
+conn1 <- dbPool(drv = odbc(), dsn = "Caboodle", timeout = 30)
+
+# Import Referrals+Visit Data --------------------------------------------------
+referrals_conn <- tbl(conn1, "Referrals")
+referrals_raw <- referrals_conn %>%
+  mutate(StartInstant = as.Date(StartInstant)) %>%
+  filter(StartInstant >= as.Date("2022-04-01") & StartInstant < report_run_date) %>%
+  filter(Status != "Canceled") %>%
+  collect()
+
+# dep <- referrals_conn %>%
+#   group_by(ReceivedBySite, ReceivedByDept) %>%
+#   summarise(total = n()) %>%
+#   collect()
+
+# Import Referrals Data for Addtional Referral Details -------------------------
+# referralFactAll <- sqlQuery(conn1, "SELECT TOP 10* FROM PRDREPORT.FullAccess.ReferralFact")
+referralFact_conn <- tbl(conn1, "ReferralFact")
+
+referralFact_raw <- referralFact_conn %>%
+  # head(1000) %>%
+  # collect()
+  mutate(StartInstant = as.Date(StartInstant)) %>%
+  filter(StartInstant >= as.Date("2022-04-01") & StartInstant <= report_run_date) %>%
+  group_by(ReferralKey, ReferredToDepartmentSpecialty, StartInstant, `_CreationInstant`, `_LastUpdatedInstant`, LastEnteredWorkqueueDateKey_X,
+           LastEnteredWorkqueueTimeKey_X, LastEnteredWorkqueueName_X,
+           Class, Priority, Redirected, Rejected, TriageRejectionReason, InAnyWorkqueue, StatusReason, SchedulingStatus,
+           FirstCallMadeInstant, FirstEncounterCreatedInstant, FirstEncounterInstant, ExpirationInstant,
+           WasPatientContactedWithin12Hours_X,
+           ProfessionalChargeAmount, ProfessionalChargeEstimate, HospitalChargeEstimate,
+           PrimaryCoverageKey) %>%
+  summarise(total = n()) %>%
+  # left_join(coverage_payor_plan_tbl, 
+  #           by = "COVERAGE_ID",
+  #           copy = TRUE) %>%
+  collect()
+
+referralFact_raw$total <- NULL
+
+# referralFact_all <- referralFact_conn %>%
+#   mutate(StartInstant = as.Date(StartInstant)) %>%
+#   filter(StartInstant == as.Date("2022-11-03")) %>%
+#   collect()
+
+visitFact_conn <- tbl(conn1, "VisitFact")
+visitFact_raw <- visitFact_conn %>%
+  filter(ReferralKey >0) %>%
+  group_by(ReferralKey, AppointmentStatus, AppointmentCreationDateKey, AppointmentCancellationDateKey) %>%
+  summarise(total = n()) %>%
+  collect() %>%
+  group_by(ReferralKey) %>%
+  mutate(first_appt = as.Date(as.character(min(AppointmentCreationDateKey)),  format = "%Y%m%d"))
+
+
+# Append Additional Referral Columns -------------------------------------------
+referrals_merged <- left_join(referrals_raw, subset(referralFact_raw, select = -c(StartInstant, Priority)))
+referrals_merged <- referrals_merged %>%
+  mutate(SentByDepID = as.character(SentByDepID),
+         ReceivedByDepID = as.character(ReceivedByDepID))
+
+
+```
+
+
+```{r Referrals Data Processing, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Referrals Raw Data Processing ------------------------------------------------
+# Priority Groups =============================================================
+referrals_merged <- referrals_merged %>%
+  mutate(createdWeek = floor_date(as.Date(StartInstant, "%Y-%m-%d"), unit="week", week_start = 7),
+         createdYear = format(as.Date(StartInstant, "%Y-%m-%d"),"%Y"),
+         createdMonNum = as.numeric(format(as.Date(StartInstant, "%Y-%m-%d"),"%m")),
+         createdMonth = format(as.Date(StartInstant, "%Y-%m-%d"),"%B"),
+         createdMonthYear = format(as.Date(StartInstant, "%Y-%m-%d"),"%m-%Y")) %>%
+  mutate(priority_type = case_when(str_detect(toupper(Priority), "CONVENIENCE") ~ "Patient Convenience"
+                                   ,str_detect(toupper(Priority), "2 DAYS") ~ "Within 2 Days"
+                                   ,str_detect(toupper(Priority), "1 WEEK") ~ "Within 1 Week"
+                                   ,str_detect(toupper(Priority), "2 WEEKS") ~ "Within 2 Weeks"
+                                   ,str_detect(toupper(Priority), "3-6 Days") ~ "Within 1 Week" # Question: Should this be separate category?
+                                   ,str_detect(toupper(Priority), "7-14 Days") ~ "Within 2 Weeks"
+                                   ,Priority == "Routine" ~ "Routine"
+                                   ,TRUE ~ "Not Specified"))
+
+```
+
+
+```{r Unique Referral Volume Data, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Unique Referrals by Appointment Status -------------------------------------------------------
+referrals_processed <- referrals_merged %>%
+  group_by(ReferralKey) %>%
+  mutate(ApptStatusFinal = NA) %>%
+  mutate(ApptStatusFinal = case_when((is.na(ApptStatusFinal) & any(AppointmentStatus %in% c("Arrived","Completed"))) ~ "Arrived"
+                                     ,(is.na(ApptStatusFinal) & any(AppointmentStatus %in% c("No Show", "Left without seen"))) ~ "No Show"
+                                     ,(is.na(ApptStatusFinal) & any(AppointmentStatus == "Canceled")) ~ "Canceled"
+                                     ,(is.na(ApptStatusFinal) & any(AppointmentStatus %in% c("Scheduled","Confirmed"))) ~ "Scheduled"
+                                     ,TRUE ~ "Pending"))
+
+
+# Unique Referral Volume by Appointment Status (Department) -------------------------------------------------
+referral_vol <- referrals_processed %>%
+  group_by(SentBySite, SentByDepID, SentByDept, SentBySpecialty, SentByProvider, SentByProvNPI,
+           ReceivedBySite, ReceivedByDepID, ReceivedByDept, ReceivedBySpecialty, ReferredToDepartmentSpecialty, ReceivedByProvider, ReceivedByProvNPI,
+           StartInstant, createdYear, createdMonthYear, createdMonNum, createdMonth, createdWeek, ReferralKey, ReferralEpicId, ProcedureName, priority_type, ApptStatusFinal,
+           Class, WasPatientContactedWithin12Hours_X, CreationToFirstEncounterDate, ExpirationInstant,
+           ProfessionalChargeEstimate, HospitalChargeEstimate, Redirected, Rejected, TriageRejectionReason, InAnyWorkqueue,
+           Patient_MRN, ICD_10_Chosen,
+           Status, CloseReason, SchedulingStatus) %>%
+  summarise(total = n()) %>%
+  # mutate(SentBySpecialty = case_when(SentByDept %in% c("MS EPICCARE LINK","MS RYAN CENTER LINK") ~ "ECL"
+  #                               # ,str_detect(toupper(SentByDept), "EMERGENCY") ~ "ED"
+  #                               # ,SentByDept == "EMERGENCY DEPARTMENT PSYCH" ~ "ED Psych"
+  #                               # ,SentByDept == "CPEP PSYCH ED BI" ~ "ED Psych"
+  #                               , TRUE ~ SentBySpecialty)) %>%
+  mutate(SentBySite = case_when(SentByDept %in% c("MS RYAN CENTER LINK") ~ "RYAN CENTER"
+                                     # ,SentByDept == "EMERGENCY DEPT BI" ~ "MSBI"
+                                     # ,SentByDept == "EMERGENCY DEPT MORNINGSIDE" ~ "MSM"
+                                     # ,SentByDept == "EMERGENCY DEPT WEST" ~ "MSW"
+                                     # ,SentByDept == "EMERGENCY DEPARTMENT" ~ "MSH"
+                                     # ,SentByDept == "EMERGENCY DEPT QUEENS" ~ "MSQ"
+                                     # ,SentByDept == "EMERGENCY DEPT BI BROOKLYN" ~ "MSB"
+                                     # ,SentByDept == "EMERGENCY DEPARTMENT PSYCH" ~ "MSH"
+                                     # ,SentByDept == "CPEP PSYCH ED BI" ~ "MSBI"
+                                     ,TRUE ~ SentBySite))
+
+referral_vol$referral_age <- difftime(report_run_date-1, as.Date(referral_vol$StartInstant, "%Y-%m%-%d"), units = "days")
+
+
+# Merge Appointment Scheduled Date 
+referral_vol$first_appt_created <- visitFact_raw$first_appt[match(referral_vol$ReferralKey, visitFact_raw$ReferralKey)]
+referral_vol <- referral_vol %>%
+  mutate(scheduledWeek = floor_date(as.Date(first_appt_created, "%Y-%m-%d"), unit="week", week_start = 7),
+         scheduledYear = format(as.Date(first_appt_created, "%Y-%m-%d"),"%Y"),
+         scheduledMonNum = as.numeric(format(as.Date(first_appt_created, "%Y-%m-%d"),"%m")),
+         scheduledMonth = format(as.Date(first_appt_created, "%Y-%m-%d"),"%B"),
+         scheduledMonthYear = format(as.Date(first_appt_created, "%Y-%m-%d"),"%m-%Y"),
+         scheduledYearMonth = format(as.Date(first_appt_created, "%Y-%m-%d"),"%Y-%m")) 
+  # mutate(leadDays = difftime(StartInstant, first_appt_created, units = "days")) 
+
+
+# saveRDS(referral_vol, "referral_vol.rds")
+# referral_vol <- readRDS("referral_vol.rds")
+```
+
+
+```{r Import Processed Referrals Data, echo = FALSE, warning = FALSE, message = FALSE}
+
+# referrals <- readRDS("/nfs/data/Applications/Ambulatory/Data_Updated/referral_vol.rds")
+# referrals <- readRDS("referral_vol.rds")
+referrals <- referral_vol
+
+master_amb_mapping <- master_amb_mapping_tbl %>% collect()
+sessional_prov_mapping <- sessional_prov_mapping_tbl %>% collect()
+
+  
+
+# Referrals Data Processing
+referrals$Managed <-  master_amb_mapping$Managed[match(referrals$ReceivedByDepID, master_amb_mapping$DepartmentId)]
+referrals$Site <- master_amb_mapping$Site[match(referrals$ReceivedByDepID, master_amb_mapping$DepartmentId)]
+referrals$Office <- master_amb_mapping$`Office/Procedure`[match(referrals$ReceivedByDepID, master_amb_mapping$DepartmentId)] # Office visit department?
+
+# ## Manual Mapping of Specialty and Site
+referrals$Campus.Specialty.Group <- master_amb_mapping$Campus.Specialty.Group[match(referrals$ReceivedByDepID, 
+                                                                master_amb_mapping$DepartmentId)]
+referrals$Campus.Specialty.SubGroup <- master_amb_mapping$Campus.Specialty.SubGroup[match(referrals$ReceivedByDepID, 
+                                                                master_amb_mapping$DepartmentId)]
+
+
+referrals <- left_join(referrals, sessional_prov_mapping, 
+                       by = c("ReceivedByDept" =  "DEPARTMENT_NAME",
+                              "ReceivedByProvider"  = "Provider"))
+
+referrals <- referrals %>%
+  mutate(Site = ifelse(is.na(`Sessional Site`), Site, `Sessional Site`),
+         Managed = ifelse(is.na(`Sessional Managed`), Managed, `Sessional Managed`),
+         Campus.Specialty.Group = ifelse(is.na(`Sessional Campus.Specialty.Group`), Campus.Specialty.Group, `Sessional Campus.Specialty.Group`),
+         Office = ifelse(is.na(`Sessional Office`), Office, `Sessional Office`)) 
+
+
+referrals <- referrals %>%
+  mutate(Campus.Specialty.Group = case_when(ReceivedByDept == "787 11TH AVE MSW SPINE CENTER" & ReceivedByProvider %in% ortho_providers ~ "Orthopedics",
+                                            TRUE ~ Campus.Specialty.Group))
+
+invisible(gc())
+```
+
+
+```{r Conversion Rate, echo = FALSE, warning = FALSE, message = FALSE}
+
+# Referrals Conversion Rate
+monthly_referral_vol <- referrals %>%
+  filter(Managed == "Department") %>%
+  mutate(ReceivedBySite = ifelse(is.na(ReceivedBySite), "OTHER", ReceivedBySite)) %>%
+  group_by(Campus.Specialty.Group, Campus.Specialty.SubGroup, Site, ReceivedByDept, StartInstant, ApptStatusFinal) %>%
+  summarise(total = n()) %>%
+  mutate(Received.DateYear = as.Date(StartInstant, format="%Y-%m-%d"),
+         Received.MonthYear = format(Received.DateYear, "%Y-%m"), ## Create month - year column
+         Received.Year = format(Received.DateYear, "%Y"), ## Create year column
+         Received.Month = format(Received.DateYear, "%b"), ## Create month colunm
+         Received.MonNum = as.numeric(format(Received.DateYear, format = "%m")),
+         Received.YearQtr = as.yearqtr(Received.DateYear)) %>%
+  group_by(Site, Campus.Specialty.Group, Campus.Specialty.SubGroup, Received.Year, Received.YearQtr, Received.Month, Received.MonNum, ApptStatusFinal) %>%
+  summarise(total = n())
+
+
+```
+
